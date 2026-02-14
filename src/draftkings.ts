@@ -8,8 +8,42 @@ import {
 
 // Proxy dispatcher for geo-blocked endpoints (odds API)
 // Node's native fetch uses undici — must use undici's ProxyAgent with `dispatcher`
-const PROXY_URL = process.env.PROXY_URL;
-const proxyDispatcher = PROXY_URL ? new ProxyAgent(PROXY_URL) : undefined;
+//
+// Supports two PROXY_URL formats:
+//   1. Standard URL:  http://username:pass@host:port
+//   2. Colon-delimited: host:port:username:pass
+function buildProxyDispatcher(): ProxyAgent | undefined {
+  const raw = process.env.PROXY_URL;
+  if (!raw) return undefined;
+
+  // If it starts with http, assume standard URL format
+  if (raw.startsWith("http")) {
+    const url = new URL(raw);
+    const opts: any = { uri: `${url.protocol}//${url.hostname}:${url.port}` };
+    if (url.username) {
+      opts.token = `Basic ${Buffer.from(`${decodeURIComponent(url.username)}:${decodeURIComponent(url.password)}`).toString("base64")}`;
+    }
+    console.log(`[Proxy] Using URL format → ${url.hostname}:${url.port} (auth: ${!!url.username})`);
+    return new ProxyAgent(opts);
+  }
+
+  // Otherwise assume host:port:username:password
+  const parts = raw.split(":");
+  if (parts.length >= 4) {
+    const [host, port, username, ...passParts] = parts;
+    const password = passParts.join(":"); // password may contain colons
+    const opts: any = { uri: `http://${host}:${port}` };
+    opts.token = `Basic ${Buffer.from(`${username}:${password}`).toString("base64")}`;
+    console.log(`[Proxy] Using colon format → ${host}:${port} (auth: true)`);
+    return new ProxyAgent(opts);
+  }
+
+  // Fallback: just pass as-is
+  console.log(`[Proxy] Using raw format: ${raw}`);
+  return new ProxyAgent(raw);
+}
+
+const proxyDispatcher = buildProxyDispatcher();
 
 // ── Types for DraftKings API responses ──
 
