@@ -63,6 +63,7 @@ if (!SCRAPER_API_KEY) {
   );
 }
 
+console.log(`[Config] Proxy: ${process.env.PROXY_URL ? "configured" : "not set (direct connection)"}`);
 console.log(`[Scheduler] Cron schedule: ${CRON_SCHEDULE}`);
 console.log(`[Scheduler] Run on start: ${RUN_ON_START}`);
 cron.schedule(CRON_SCHEDULE, scrape);

@@ -1,9 +1,14 @@
+import { HttpsProxyAgent } from "https-proxy-agent";
 import {
   DK_NAV_URL,
   DK_ODDS_BASE_URL,
   TENNIS_DISPLAY_GROUP_ID,
   shouldSkipTournament,
 } from "./config.js";
+
+// Proxy agent for geo-blocked endpoints (odds API)
+const PROXY_URL = process.env.PROXY_URL;
+const proxyAgent = PROXY_URL ? new HttpsProxyAgent(PROXY_URL) : undefined;
 
 // ── Types for DraftKings API responses ──
 
@@ -139,13 +144,18 @@ export async function fetchTournamentOdds(
   console.log(`[DK] Fetching odds for eventGroup ${eventGroupId}...`);
 
   try {
-    const res = await fetch(url, {
+    const fetchOptions: any = {
       headers: {
         "User-Agent":
           "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
         Accept: "application/json",
       },
-    });
+    };
+    if (proxyAgent) {
+      fetchOptions.agent = proxyAgent;
+      console.log(`[DK] Using proxy for odds request`);
+    }
+    const res = await fetch(url, fetchOptions);
 
     if (res.status === 403) {
       console.error(
