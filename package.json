@@ -8,9 +8,9 @@
     "dev": "tsx src/index.ts"
   },
   "dependencies": {
-    "https-proxy-agent": "^7.0.6",
     "node-cron": "^3.0.3",
-    "dotenv": "^16.4.7"
+    "dotenv": "^16.4.7",
+    "undici": "^6.6.0"
   },
   "devDependencies": {
     "typescript": "^5.4.0",

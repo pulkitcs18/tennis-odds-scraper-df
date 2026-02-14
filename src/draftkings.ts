@@ -1,4 +1,4 @@
-import { HttpsProxyAgent } from "https-proxy-agent";
+import { ProxyAgent } from "undici";
 import {
   DK_NAV_URL,
   DK_ODDS_BASE_URL,
@@ -6,9 +6,10 @@ import {
   shouldSkipTournament,
 } from "./config.js";
 
-// Proxy agent for geo-blocked endpoints (odds API)
+// Proxy dispatcher for geo-blocked endpoints (odds API)
+// Node's native fetch uses undici — must use undici's ProxyAgent with `dispatcher`
 const PROXY_URL = process.env.PROXY_URL;
-const proxyAgent = PROXY_URL ? new HttpsProxyAgent(PROXY_URL) : undefined;
+const proxyDispatcher = PROXY_URL ? new ProxyAgent(PROXY_URL) : undefined;
 
 // ── Types for DraftKings API responses ──
 
@@ -151,8 +152,8 @@ export async function fetchTournamentOdds(
         Accept: "application/json",
       },
     };
-    if (proxyAgent) {
-      fetchOptions.agent = proxyAgent;
+    if (proxyDispatcher) {
+      fetchOptions.dispatcher = proxyDispatcher;
       console.log(`[DK] Using proxy for odds request`);
     }
     const res = await fetch(url, fetchOptions);
