@@ -26,6 +26,7 @@ export async function launchBrowser(): Promise<void> {
       "--disable-dev-shm-usage",
       "--disable-gpu",
       "--disable-software-rasterizer",
+      "--disable-blink-features=AutomationControlled",
     ],
   });
   console.log("[Browser] Chrome launched");
@@ -53,13 +54,22 @@ export async function createDKPage(): Promise<Page> {
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36"
   );
 
-  console.log("[Browser] Navigating to DraftKings sportsbook...");
-  await page.goto("https://sportsbook.draftkings.com", {
-    waitUntil: "networkidle2",
-    timeout: 30000,
+  // Stealth: hide webdriver flag
+  await page.evaluateOnNewDocument(() => {
+    Object.defineProperty(navigator, "webdriver", { get: () => false });
   });
 
-  // Log the final URL (DK may redirect based on location)
+  // Use 'domcontentloaded' — DK has persistent WebSocket connections
+  // that prevent 'networkidle2' from ever resolving
+  console.log("[Browser] Navigating to DraftKings sportsbook...");
+  await page.goto("https://sportsbook.draftkings.com", {
+    waitUntil: "domcontentloaded",
+    timeout: 60000,
+  });
+
+  // Wait a few seconds for JS to initialize and set cookies
+  await new Promise((r) => setTimeout(r, 5000));
+
   const finalUrl = page.url();
   console.log(`[Browser] Landed on: ${finalUrl}`);
 
