@@ -192,78 +192,142 @@ export async function fetchTennisTournaments(): Promise<DKTournament[]> {
 }
 
 /**
- * Fetch odds for a specific tournament by navigating the browser
- * directly to the DraftKings v5 API URL. This is a top-level
- * navigation (not a JS fetch), so there's no CORS. The browser
- * sends session cookies established during createDKPage().
+ * Navigate to the DraftKings tennis page and intercept ALL network
+ * responses to capture eventGroup data. DK's own JavaScript makes
+ * API calls with proper auth headers that pass the WAF — we just
+ * listen for the responses.
  *
- * page.goto() returns the HTTP response directly, so we can
- * read the JSON without any interception tricks.
+ * Also logs every non-static network response for debugging, so
+ * we can see exactly what API endpoints DK's frontend uses.
  */
-export async function fetchTournamentOdds(
+export async function fetchAllTournamentOdds(
   page: Page,
-  eventGroupId: number
-): Promise<DKEventGroupResponse | null> {
-  const apiUrl = `${DK_ODDS_BASE_URL}/${eventGroupId}?format=json`;
+  tournaments: DKTournament[]
+): Promise<Map<number, DKEventGroupResponse>> {
+  const targetIds = new Set(tournaments.map((t) => t.eventGroupId));
+  const results = new Map<number, DKEventGroupResponse>();
+  const apiLog: string[] = [];
 
-  console.log(
-    `[DK] Fetching odds for eventGroup ${eventGroupId} via direct navigation...`
-  );
+  const handler = async (
+    resp: import("puppeteer-core").HTTPResponse
+  ) => {
+    const url = resp.url();
+    const status = resp.status();
 
-  try {
-    const response = await page.goto(apiUrl, {
-      waitUntil: "networkidle0",
-      timeout: 30000,
-    });
+    // Skip static assets
+    if (
+      /\.(js|css|png|svg|jpg|jpeg|gif|webp|woff2?|ttf|eot|ico)(\?|$)/i.test(
+        url
+      )
+    )
+      return;
+    if (url.startsWith("data:")) return;
 
-    if (!response) {
-      console.error(`[DK] No response for eventGroup ${eventGroupId}`);
-      return null;
-    }
+    const shortUrl = url.length > 200 ? url.substring(0, 200) + "..." : url;
+    apiLog.push(`[${status}] ${shortUrl}`);
 
-    const status = response.status();
-    console.log(`[DK] eventGroup ${eventGroupId}: HTTP ${status}`);
+    if (status !== 200) return;
 
-    if (status !== 200) {
-      const text = await response.text().catch(() => "");
-      console.error(
-        `[DK] eventGroup ${eventGroupId} returned ${status}: ${text.substring(0, 200)}`
-      );
-      return null;
-    }
+    // Only try to parse JSON responses
+    const ct = resp.headers()["content-type"] || "";
+    if (!ct.includes("json") && !ct.includes("javascript")) return;
 
-    // The browser renders JSON as text — read it from the response
-    let json: any;
     try {
-      json = await response.json();
+      const json = await resp.json();
+
+      // Single eventGroup response (v5 API format)
+      if (json?.eventGroup?.eventGroupId) {
+        const egId = json.eventGroup.eventGroupId;
+        if (targetIds.has(egId)) {
+          results.set(egId, json as DKEventGroupResponse);
+          console.log(
+            `[DK] Captured eventGroup ${egId} (${json.eventGroup.name}) from: ${shortUrl}`
+          );
+        }
+      }
+
+      // Array of eventGroups
+      if (Array.isArray(json)) {
+        for (const item of json) {
+          if (item?.eventGroup?.eventGroupId) {
+            const egId = item.eventGroup.eventGroupId;
+            if (targetIds.has(egId)) {
+              results.set(egId, item as DKEventGroupResponse);
+              console.log(
+                `[DK] Captured eventGroup ${egId} from array response`
+              );
+            }
+          }
+        }
+      }
+
+      // Nested structure — some DK endpoints wrap data differently
+      if (json?.events || json?.offers || json?.eventGroup === undefined) {
+        // Log structure for discovery
+        const keys = Object.keys(json).slice(0, 10).join(", ");
+        if (keys && !keys.includes("html")) {
+          apiLog.push(`  ^ JSON keys: ${keys}`);
+        }
+      }
     } catch {
-      // Some browsers wrap JSON in HTML <pre> tags — extract from page
-      const bodyText = await page.evaluate(() => document.body?.innerText || "");
-      console.log(
-        `[DK] response.json() failed, trying page body (${bodyText.length} chars)...`
-      );
-      json = JSON.parse(bodyText);
+      // Not valid JSON — skip
     }
+  };
 
-    if (!json?.eventGroup) {
-      console.error(
-        `[DK] eventGroup ${eventGroupId}: response has no eventGroup key`
-      );
+  page.on("response", handler);
+
+  // Try navigating to the DK tennis page
+  const tennisUrls = [
+    "https://sportsbook.draftkings.com/leagues/tennis",
+    "https://sportsbook.draftkings.com/sport/tennis",
+  ];
+
+  for (const url of tennisUrls) {
+    if (results.size === targetIds.size) break;
+
+    console.log(`[DK] Navigating to ${url}...`);
+    try {
+      await page.goto(url, {
+        waitUntil: "domcontentloaded",
+        timeout: 60000,
+      });
+
+      const landedUrl = page.url();
+      console.log(`[DK] Landed on: ${landedUrl}`);
+
+      // Wait for DK's JS to make API calls
+      await new Promise((r) => setTimeout(r, 15000));
+
       console.log(
-        `[DK] Response keys: ${Object.keys(json || {}).join(", ")}`
+        `[DK] After ${url}: captured ${results.size}/${targetIds.size} tournaments`
       );
-      return null;
+
+      if (results.size > 0) break;
+    } catch (err) {
+      console.log(`[DK] Navigation to ${url} failed: ${err}`);
     }
-
-    const eventCount = json.eventGroup?.events?.length ?? 0;
-    const categoryCount = json.eventGroup?.offerCategories?.length ?? 0;
-    console.log(
-      `[DK] eventGroup ${eventGroupId}: ${eventCount} events, ${categoryCount} offer categories`
-    );
-
-    return json as DKEventGroupResponse;
-  } catch (err) {
-    console.error(`[DK] Failed for eventGroup ${eventGroupId}:`, err);
-    return null;
   }
+
+  page.off("response", handler);
+
+  // Debug: log all non-static responses
+  console.log(`\n[DK Debug] ${apiLog.length} API/network responses:`);
+  for (const line of apiLog) {
+    console.log(`  ${line}`);
+  }
+
+  // Summary
+  console.log(
+    `\n[DK] Captured data for ${results.size}/${tournaments.length} tournaments:`
+  );
+  for (const t of tournaments) {
+    const found = results.has(t.eventGroupId);
+    const r = results.get(t.eventGroupId);
+    const eventCount = r?.eventGroup?.events?.length ?? 0;
+    console.log(
+      `  ${found ? "OK" : "MISSING"} ${t.name} (${t.eventGroupId})${found ? ` — ${eventCount} events` : ""}`
+    );
+  }
+
+  return results;
 }

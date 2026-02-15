@@ -5,7 +5,7 @@ import {
   closeBrowser,
   createDKPage,
   fetchTennisTournaments,
-  fetchTournamentOdds,
+  fetchAllTournamentOdds,
 } from "./draftkings.js";
 import { transformDKResponse, SportEventInsert } from "./transformer.js";
 import { uploadEvents } from "./uploader.js";
@@ -31,24 +31,21 @@ async function scrape(): Promise<void> {
     await launchBrowser();
     const page = await createDKPage();
 
-    // Step 3: Fetch odds for each tournament via browser
+    // Step 3: Navigate to DK tennis page and intercept all odds data
+    const oddsMap = await fetchAllTournamentOdds(page, tournaments);
+
+    // Step 4: Transform captured data
     const allEvents: SportEventInsert[] = [];
 
     for (const tournament of tournaments) {
-      try {
-        const response = await fetchTournamentOdds(
-          page,
-          tournament.eventGroupId
-        );
-        if (!response) continue;
+      const response = oddsMap.get(tournament.eventGroupId);
+      if (!response) continue;
 
+      try {
         const events = transformDKResponse(response, tournament.name);
         allEvents.push(...events);
-
-        // 2s delay between requests
-        await new Promise((r) => setTimeout(r, 2000));
       } catch (err) {
-        console.error(`[Scraper] Error processing ${tournament.name}:`, err);
+        console.error(`[Scraper] Error transforming ${tournament.name}:`, err);
       }
     }
 
@@ -57,7 +54,7 @@ async function scrape(): Promise<void> {
 
     console.log(`\n[Scraper] Total events scraped: ${allEvents.length}`);
 
-    // Step 4: Upload to Supabase
+    // Step 5: Upload to Supabase
     if (allEvents.length > 0) {
       await uploadEvents(allEvents);
     }
