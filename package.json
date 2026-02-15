@@ -1,6 +1,6 @@
 {
   "name": "tennis-odds-scraper-df",
-  "version": "1.0.0",
+  "version": "2.0.0",
   "type": "module",
   "scripts": {
     "build": "tsc",
@@ -8,9 +8,9 @@
     "dev": "tsx src/index.ts"
   },
   "dependencies": {
+    "puppeteer-core": "^23.11.0",
     "node-cron": "^3.0.3",
-    "dotenv": "^16.4.7",
-    "undici": "^6.6.0"
+    "dotenv": "^16.4.7"
   },
   "devDependencies": {
     "typescript": "^5.4.0",

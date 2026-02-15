@@ -1,4 +1,4 @@
-import { ProxyAgent } from "undici";
+import puppeteer, { Browser, Page } from "puppeteer-core";
 import {
   DK_NAV_URL,
   DK_ODDS_BASE_URL,
@@ -6,44 +6,65 @@ import {
   shouldSkipTournament,
 } from "./config.js";
 
-// Proxy dispatcher for geo-blocked endpoints (odds API)
-// Node's native fetch uses undici — must use undici's ProxyAgent with `dispatcher`
-//
-// Supports two PROXY_URL formats:
-//   1. Standard URL:  http://username:pass@host:port
-//   2. Colon-delimited: host:port:username:pass
-function buildProxyDispatcher(): ProxyAgent | undefined {
-  const raw = process.env.PROXY_URL;
-  if (!raw) return undefined;
+// ── Browser management ──
 
-  // If it starts with http, assume standard URL format
-  if (raw.startsWith("http")) {
-    const url = new URL(raw);
-    const opts: any = { uri: `${url.protocol}//${url.hostname}:${url.port}` };
-    if (url.username) {
-      opts.token = `Basic ${Buffer.from(`${decodeURIComponent(url.username)}:${decodeURIComponent(url.password)}`).toString("base64")}`;
-    }
-    console.log(`[Proxy] Using URL format → ${url.hostname}:${url.port} (auth: ${!!url.username})`);
-    return new ProxyAgent(opts);
-  }
+let browser: Browser | null = null;
 
-  // Otherwise assume host:port:username:password
-  const parts = raw.split(":");
-  if (parts.length >= 4) {
-    const [host, port, username, ...passParts] = parts;
-    const password = passParts.join(":"); // password may contain colons
-    const opts: any = { uri: `http://${host}:${port}` };
-    opts.token = `Basic ${Buffer.from(`${username}:${password}`).toString("base64")}`;
-    console.log(`[Proxy] Using colon format → ${host}:${port} (auth: true)`);
-    return new ProxyAgent(opts);
-  }
+export async function launchBrowser(): Promise<void> {
+  if (browser) return;
 
-  // Fallback: just pass as-is
-  console.log(`[Proxy] Using raw format: ${raw}`);
-  return new ProxyAgent(raw);
+  const executablePath =
+    process.env.PUPPETEER_EXECUTABLE_PATH || "/usr/bin/chromium";
+
+  console.log(`[Browser] Launching Chrome from ${executablePath}...`);
+  browser = await puppeteer.launch({
+    headless: true,
+    executablePath,
+    args: [
+      "--no-sandbox",
+      "--disable-setuid-sandbox",
+      "--disable-dev-shm-usage",
+      "--disable-gpu",
+      "--disable-software-rasterizer",
+    ],
+  });
+  console.log("[Browser] Chrome launched");
 }
 
-const proxyDispatcher = buildProxyDispatcher();
+export async function closeBrowser(): Promise<void> {
+  if (browser) {
+    await browser.close();
+    browser = null;
+    console.log("[Browser] Chrome closed");
+  }
+}
+
+/**
+ * Create a page with a DraftKings session established.
+ * Navigates to sportsbook.draftkings.com so the browser has
+ * valid cookies/headers for subsequent API calls.
+ */
+export async function createDKPage(): Promise<Page> {
+  if (!browser) throw new Error("Browser not launched");
+
+  const page = await browser.newPage();
+  await page.setViewport({ width: 1920, height: 1080 });
+  await page.setUserAgent(
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36"
+  );
+
+  console.log("[Browser] Navigating to DraftKings sportsbook...");
+  await page.goto("https://sportsbook.draftkings.com", {
+    waitUntil: "networkidle2",
+    timeout: 30000,
+  });
+
+  // Log the final URL (DK may redirect based on location)
+  const finalUrl = page.url();
+  console.log(`[Browser] Landed on: ${finalUrl}`);
+
+  return page;
+}
 
 // ── Types for DraftKings API responses ──
 
@@ -98,11 +119,7 @@ export interface DKEventGroupResponse {
 
 /**
  * Fetch all active tennis tournaments from DraftKings nav API.
- * This endpoint is NOT geo-blocked.
- *
- * Response shape:
- *   { displayGroupInfos: [{ displayGroupId: "6", displayName: "Tennis",
- *       eventGroupInfos: [{ eventGroupId: 207726, eventGroupName: "ATP - Dallas" }, ...] }] }
+ * This endpoint is NOT geo-blocked — uses plain fetch (no browser needed).
  */
 export async function fetchTennisTournaments(): Promise<DKTournament[]> {
   console.log("[DK] Fetching tennis tournaments from nav API...");
@@ -113,8 +130,6 @@ export async function fetchTennisTournaments(): Promise<DKTournament[]> {
   }
 
   const data = await res.json();
-
-  // Nav API returns { displayGroupInfos: [...] }
   const groups: any[] = data.displayGroupInfos || [];
 
   const tennisSport = groups.find(
@@ -134,7 +149,6 @@ export async function fetchTennisTournaments(): Promise<DKTournament[]> {
     return [];
   }
 
-  // Event groups (tournaments) are in eventGroupInfos
   const eventGroups: any[] = tennisSport.eventGroupInfos || [];
   const tournaments: DKTournament[] = [];
 
@@ -149,7 +163,6 @@ export async function fetchTennisTournaments(): Promise<DKTournament[]> {
       continue;
     }
 
-    // Skip doubles tournaments
     if (name.toLowerCase().includes("doubles")) {
       console.log(`[DK] Skipping "${name}" (doubles)`);
       continue;
@@ -169,56 +182,47 @@ export async function fetchTennisTournaments(): Promise<DKTournament[]> {
 }
 
 /**
- * Fetch odds for a specific tournament from DraftKings v5 API.
- * NOTE: This endpoint IS geo-blocked — must run from a US IP.
+ * Fetch odds for a specific tournament using the browser session.
+ * Makes a fetch() call from within the DK page context, inheriting
+ * all cookies and headers that the browser established.
  */
 export async function fetchTournamentOdds(
+  page: Page,
   eventGroupId: number
 ): Promise<DKEventGroupResponse | null> {
-  const url = `${DK_ODDS_BASE_URL}/${eventGroupId}?format=json`;
-  console.log(`[DK] Fetching odds for eventGroup ${eventGroupId}...`);
+  const apiUrl = `${DK_ODDS_BASE_URL}/${eventGroupId}?format=json`;
+  console.log(`[DK] Fetching odds for eventGroup ${eventGroupId} via browser...`);
 
   try {
-    const fetchOptions: any = {
-      headers: {
-        "User-Agent":
-          "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
-        Accept: "application/json",
-      },
-    };
-    if (proxyDispatcher) {
-      fetchOptions.dispatcher = proxyDispatcher;
-      console.log(`[DK] Using proxy for odds request`);
-    }
-    const res = await fetch(url, fetchOptions);
+    const result = await page.evaluate(async (url: string) => {
+      try {
+        const res = await fetch(url, { credentials: "include" });
+        if (!res.ok) {
+          return { _error: true, status: res.status, text: await res.text().catch(() => "") };
+        }
+        return await res.json();
+      } catch (e: any) {
+        return { _error: true, message: e.message };
+      }
+    }, apiUrl);
 
-    if (res.status === 403) {
+    if (!result || result._error) {
       console.error(
-        `[DK] Geo-blocked for eventGroup ${eventGroupId}. Ensure Railway is deployed in a US region.`
+        `[DK] Error for eventGroup ${eventGroupId}:`,
+        result?.status || result?.message || "no data"
       );
       return null;
     }
 
-    if (!res.ok) {
-      const body = await res.text();
-      console.error(
-        `[DK] Error ${res.status} for eventGroup ${eventGroupId}: ${body.slice(0, 200)}`
-      );
-      return null;
-    }
-
-    const data: DKEventGroupResponse = await res.json();
-
-    // Log response shape for debugging
-    const eventCount = data.eventGroup?.events?.length ?? 0;
-    const categoryCount = data.eventGroup?.offerCategories?.length ?? 0;
+    const eventCount = result.eventGroup?.events?.length ?? 0;
+    const categoryCount = result.eventGroup?.offerCategories?.length ?? 0;
     console.log(
       `[DK] eventGroup ${eventGroupId}: ${eventCount} events, ${categoryCount} offer categories`
     );
 
-    return data;
+    return result as DKEventGroupResponse;
   } catch (err) {
-    console.error(`[DK] Failed to fetch eventGroup ${eventGroupId}:`, err);
+    console.error(`[DK] Failed for eventGroup ${eventGroupId}:`, err);
     return null;
   }
 }

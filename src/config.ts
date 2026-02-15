@@ -20,7 +20,6 @@ export const RUN_ON_START = process.env.RUN_ON_START !== "false";
 
 /**
  * Tournaments already covered by The Odds API — skip to avoid duplicates.
- * Matching is case-insensitive substring check against tournament name.
  */
 const SKIP_TOURNAMENT_KEYWORDS = [
   // Grand Slams

@@ -1,6 +1,12 @@
 import cron from "node-cron";
 import { CRON_SCHEDULE, RUN_ON_START, SCRAPER_API_KEY } from "./config.js";
-import { fetchTennisTournaments, fetchTournamentOdds } from "./draftkings.js";
+import {
+  launchBrowser,
+  closeBrowser,
+  createDKPage,
+  fetchTennisTournaments,
+  fetchTournamentOdds,
+} from "./draftkings.js";
 import { transformDKResponse, SportEventInsert } from "./transformer.js";
 import { uploadEvents } from "./uploader.js";
 
@@ -13,7 +19,7 @@ async function scrape(): Promise<void> {
   console.log(`${"=".repeat(60)}`);
 
   try {
-    // Step 1: Discover active tennis tournaments not covered by Odds API
+    // Step 1: Discover active tennis tournaments (plain fetch, no browser)
     const tournaments = await fetchTennisTournaments();
 
     if (tournaments.length === 0) {
@@ -21,27 +27,37 @@ async function scrape(): Promise<void> {
       return;
     }
 
-    // Step 2: Fetch odds for each tournament
+    // Step 2: Launch browser and establish DK session
+    await launchBrowser();
+    const page = await createDKPage();
+
+    // Step 3: Fetch odds for each tournament via browser
     const allEvents: SportEventInsert[] = [];
 
     for (const tournament of tournaments) {
       try {
-        const response = await fetchTournamentOdds(tournament.eventGroupId);
+        const response = await fetchTournamentOdds(
+          page,
+          tournament.eventGroupId
+        );
         if (!response) continue;
 
         const events = transformDKResponse(response, tournament.name);
         allEvents.push(...events);
 
-        // 1s delay between requests to avoid rate limiting
-        await new Promise((r) => setTimeout(r, 1000));
+        // 2s delay between requests
+        await new Promise((r) => setTimeout(r, 2000));
       } catch (err) {
         console.error(`[Scraper] Error processing ${tournament.name}:`, err);
       }
     }
 
+    // Close the page (but keep browser alive for next cycle)
+    await page.close();
+
     console.log(`\n[Scraper] Total events scraped: ${allEvents.length}`);
 
-    // Step 3: Upload to Supabase via edge function
+    // Step 4: Upload to Supabase
     if (allEvents.length > 0) {
       await uploadEvents(allEvents);
     }
@@ -52,6 +68,8 @@ async function scrape(): Promise<void> {
     );
   } catch (err) {
     console.error("[Scraper] Fatal error:", err);
+    // Close browser on fatal error so it gets relaunched next cycle
+    await closeBrowser();
   }
 }
 
@@ -63,7 +81,6 @@ if (!SCRAPER_API_KEY) {
   );
 }
 
-console.log(`[Config] Proxy: ${process.env.PROXY_URL ? "configured" : "not set (direct connection)"}`);
 console.log(`[Scheduler] Cron schedule: ${CRON_SCHEDULE}`);
 console.log(`[Scheduler] Run on start: ${RUN_ON_START}`);
 cron.schedule(CRON_SCHEDULE, scrape);
