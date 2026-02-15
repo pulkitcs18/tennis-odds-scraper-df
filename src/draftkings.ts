@@ -41,9 +41,10 @@ export async function closeBrowser(): Promise<void> {
 }
 
 /**
- * Create a fresh browser page with stealth settings.
- * Does NOT navigate anywhere — each fetchTournamentOdds call
- * navigates to the specific tournament page.
+ * Create a browser page, apply stealth settings, and navigate to
+ * sportsbook.draftkings.com to establish session cookies on
+ * .draftkings.com — these carry over when we navigate to the
+ * sportsbook-nash.draftkings.com API URLs.
  */
 export async function createDKPage(): Promise<Page> {
   if (!browser) throw new Error("Browser not launched");
@@ -59,7 +60,19 @@ export async function createDKPage(): Promise<Page> {
     Object.defineProperty(navigator, "webdriver", { get: () => false });
   });
 
-  console.log("[Browser] Page created with stealth settings");
+  // Visit DK sportsbook to establish session cookies on .draftkings.com
+  console.log("[Browser] Navigating to DraftKings to establish session...");
+  await page.goto("https://sportsbook.draftkings.com", {
+    waitUntil: "domcontentloaded",
+    timeout: 60000,
+  });
+  await new Promise((r) => setTimeout(r, 5000));
+
+  const cookies = await page.cookies();
+  console.log(
+    `[Browser] Session established. ${cookies.length} cookies set. Landed on: ${page.url()}`
+  );
+
   return page;
 }
 
@@ -179,84 +192,76 @@ export async function fetchTennisTournaments(): Promise<DKTournament[]> {
 }
 
 /**
- * Fetch odds for a specific tournament by navigating to the DraftKings
- * tournament page and intercepting the API response that DK's own
- * JavaScript makes. This avoids CORS issues since DK's code makes the
- * API call with proper headers/tokens.
+ * Fetch odds for a specific tournament by navigating the browser
+ * directly to the DraftKings v5 API URL. This is a top-level
+ * navigation (not a JS fetch), so there's no CORS. The browser
+ * sends session cookies established during createDKPage().
+ *
+ * page.goto() returns the HTTP response directly, so we can
+ * read the JSON without any interception tricks.
  */
 export async function fetchTournamentOdds(
   page: Page,
   eventGroupId: number
 ): Promise<DKEventGroupResponse | null> {
-  const tournamentPageUrl = `https://sportsbook.draftkings.com/leagues/tennis/${eventGroupId}`;
-  const apiUrlPattern = `/eventgroups/${eventGroupId}`;
+  const apiUrl = `${DK_ODDS_BASE_URL}/${eventGroupId}?format=json`;
 
   console.log(
-    `[DK] Navigating to tournament page for eventGroup ${eventGroupId}...`
+    `[DK] Fetching odds for eventGroup ${eventGroupId} via direct navigation...`
   );
 
   try {
-    // Set up a promise that resolves when we intercept the API response
-    const apiResponsePromise = new Promise<DKEventGroupResponse | null>(
-      (resolve) => {
-        const timeout = setTimeout(() => {
-          console.log(
-            `[DK] Timeout waiting for API response for eventGroup ${eventGroupId}`
-          );
-          resolve(null);
-        }, 30000);
-
-        const handler = async (response: import("puppeteer-core").HTTPResponse) => {
-          const url = response.url();
-          if (!url.includes(apiUrlPattern)) return;
-
-          try {
-            const status = response.status();
-            if (status !== 200) {
-              console.log(
-                `[DK] Intercepted API response for ${eventGroupId} with status ${status}`
-              );
-              return; // Don't resolve — might get a retry
-            }
-
-            const json = await response.json();
-            if (json?.eventGroup) {
-              clearTimeout(timeout);
-              page.off("response", handler);
-              resolve(json as DKEventGroupResponse);
-            }
-          } catch {
-            // JSON parse error — ignore and keep waiting
-          }
-        };
-
-        page.on("response", handler);
-      }
-    );
-
-    // Navigate to the tournament page
-    await page.goto(tournamentPageUrl, {
-      waitUntil: "domcontentloaded",
-      timeout: 60000,
+    const response = await page.goto(apiUrl, {
+      waitUntil: "networkidle0",
+      timeout: 30000,
     });
 
-    // Wait for DK's JS to load and fire API requests
-    const result = await apiResponsePromise;
+    if (!response) {
+      console.error(`[DK] No response for eventGroup ${eventGroupId}`);
+      return null;
+    }
 
-    if (!result) {
+    const status = response.status();
+    console.log(`[DK] eventGroup ${eventGroupId}: HTTP ${status}`);
+
+    if (status !== 200) {
+      const text = await response.text().catch(() => "");
       console.error(
-        `[DK] No API response intercepted for eventGroup ${eventGroupId}`
+        `[DK] eventGroup ${eventGroupId} returned ${status}: ${text.substring(0, 200)}`
       );
       return null;
     }
 
-    const eventCount = result.eventGroup?.events?.length ?? 0;
-    const categoryCount = result.eventGroup?.offerCategories?.length ?? 0;
+    // The browser renders JSON as text — read it from the response
+    let json: any;
+    try {
+      json = await response.json();
+    } catch {
+      // Some browsers wrap JSON in HTML <pre> tags — extract from page
+      const bodyText = await page.evaluate(() => document.body?.innerText || "");
+      console.log(
+        `[DK] response.json() failed, trying page body (${bodyText.length} chars)...`
+      );
+      json = JSON.parse(bodyText);
+    }
+
+    if (!json?.eventGroup) {
+      console.error(
+        `[DK] eventGroup ${eventGroupId}: response has no eventGroup key`
+      );
+      console.log(
+        `[DK] Response keys: ${Object.keys(json || {}).join(", ")}`
+      );
+      return null;
+    }
+
+    const eventCount = json.eventGroup?.events?.length ?? 0;
+    const categoryCount = json.eventGroup?.offerCategories?.length ?? 0;
     console.log(
       `[DK] eventGroup ${eventGroupId}: ${eventCount} events, ${categoryCount} offer categories`
     );
 
-    return result;
+    return json as DKEventGroupResponse;
   } catch (err) {
     console.error(`[DK] Failed for eventGroup ${eventGroupId}:`, err);
     return null;
