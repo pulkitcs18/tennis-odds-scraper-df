@@ -106,7 +106,9 @@ export interface DKContentSelection {
     decimal: string;
   };
   trueOdds: number;
+  points?: number;
   outcomeType: string;
+  tags?: string[];
   participants?: Array<{
     name: string;
     venueRole: string;
@@ -231,32 +233,50 @@ export async function fetchAllTournamentOdds(
     try {
       const json = await resp.json();
 
-      // DK Content API: { events[], markets[], selections[] }
-      if (
-        Array.isArray(json.events) &&
-        json.events.length > 0 &&
-        Array.isArray(json.selections)
-      ) {
-        const newEvents = json.events as DKContentEvent[];
-        const newMarkets = (json.markets || []) as DKContentMarket[];
-        const newSelections = json.selections as DKContentSelection[];
+      // DK Content API responses come in two shapes:
+      // 1. Tournament pages: { events[], markets[], selections[] }
+      // 2. Event detail pages: { markets[], selections[] } (no events)
+      const hasSelections =
+        Array.isArray(json.selections) && json.selections.length > 0;
+      const hasEvents =
+        Array.isArray(json.events) && json.events.length > 0;
+      const hasMarkets =
+        Array.isArray(json.markets) && json.markets.length > 0;
 
-        allEvents.push(...newEvents);
-        allMarkets.push(...newMarkets);
-        allSelections.push(...newSelections);
+      if (hasSelections && (hasEvents || hasMarkets)) {
+        if (hasEvents) {
+          const newEvents = json.events as DKContentEvent[];
+          allEvents.push(...newEvents);
 
-        // Log which leagues we captured
-        const leagueIds = [
-          ...new Set(newEvents.map((e: any) => e.leagueId)),
-        ];
-        const matchingLeagues = leagueIds.filter((id) =>
-          targetLeagueIds.has(id as string)
-        );
-        if (matchingLeagues.length > 0) {
-          console.log(
-            `[DK] Captured ${newEvents.length} events, ${newMarkets.length} markets, ${newSelections.length} selections for leagues: ${matchingLeagues.join(", ")}`
+          const leagueIds = [
+            ...new Set(newEvents.map((e: any) => e.leagueId)),
+          ];
+          const matchingLeagues = leagueIds.filter((id) =>
+            targetLeagueIds.has(id as string)
           );
+          if (matchingLeagues.length > 0) {
+            console.log(
+              `[DK] Captured ${newEvents.length} events, ${(json.markets || []).length} markets, ${json.selections.length} selections for leagues: ${matchingLeagues.join(", ")}`
+            );
+          }
         }
+
+        if (hasMarkets) {
+          const newMarkets = json.markets as DKContentMarket[];
+          allMarkets.push(...newMarkets);
+
+          // Log market types captured from event detail pages
+          if (!hasEvents) {
+            const marketNames = newMarkets
+              .map((m: any) => m.name)
+              .join(", ");
+            console.log(
+              `[DK] Captured ${newMarkets.length} markets (${marketNames}), ${json.selections.length} selections`
+            );
+          }
+        }
+
+        allSelections.push(...(json.selections as DKContentSelection[]));
       }
     } catch {
       // Not valid JSON

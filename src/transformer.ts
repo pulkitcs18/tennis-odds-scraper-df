@@ -148,37 +148,57 @@ export function transformDKResponse(
       }
 
       // ── Game Spread / Handicap ──
+      // DK returns multiple spread lines; use the "MainPointLine" tagged ones.
+      // Each selection has a `points` field with the spread value.
       if (
         marketName.includes("spread") ||
         marketName.includes("handicap") ||
         marketName.includes("game spread")
       ) {
-        const homeSel = sels.find((s) => s.outcomeType === "Home");
-        const awaySel = sels.find((s) => s.outcomeType === "Away");
+        const mainHome = sels.find(
+          (s) => s.outcomeType === "Home" && s.tags?.includes("MainPointLine")
+        );
+        const mainAway = sels.find(
+          (s) => s.outcomeType === "Away" && s.tags?.includes("MainPointLine")
+        );
 
-        // DK selections may have a `line` property or include line in label
-        const homeLine = (homeSel as any)?.line ?? null;
-        const awayLine = (awaySel as any)?.line ?? null;
+        // Fallback to first Home/Away if no MainPointLine tag
+        const homeSel = mainHome || sels.find((s) => s.outcomeType === "Home");
+        const awaySel = mainAway || sels.find((s) => s.outcomeType === "Away");
 
-        spread_home = homeLine ?? (sels.length >= 2 ? (sels[0] as any)?.line ?? null : null);
-        spread_away = awayLine ?? (sels.length >= 2 ? (sels[1] as any)?.line ?? null : null);
+        spread_home = homeSel?.points ?? null;
+        spread_away = awaySel?.points ?? null;
       }
 
       // ── Total Games ──
+      // DK returns multiple total lines; use the "MainPointLine" tagged ones.
+      // Each selection has a `points` field with the total value.
       if (
         marketName.includes("total") ||
         marketName.includes("over/under") ||
         marketName.includes("total games")
       ) {
-        const overSel = sels.find(
-          (s) => s.label?.toLowerCase() === "over" || s.outcomeType === "Over"
+        const mainOver = sels.find(
+          (s) => s.outcomeType === "Over" && s.tags?.includes("MainPointLine")
         );
-        const underSel = sels.find(
-          (s) => s.label?.toLowerCase() === "under" || s.outcomeType === "Under"
+        const mainUnder = sels.find(
+          (s) => s.outcomeType === "Under" && s.tags?.includes("MainPointLine")
         );
 
-        total_over = (overSel as any)?.line ?? (sels.length >= 2 ? (sels[0] as any)?.line ?? null : null);
-        total_under = (underSel as any)?.line ?? (sels.length >= 2 ? (sels[1] as any)?.line ?? null : null);
+        // Fallback to first Over/Under if no MainPointLine tag
+        const overSel =
+          mainOver ||
+          sels.find(
+            (s) => s.outcomeType === "Over" || s.label?.toLowerCase() === "over"
+          );
+        const underSel =
+          mainUnder ||
+          sels.find(
+            (s) => s.outcomeType === "Under" || s.label?.toLowerCase() === "under"
+          );
+
+        total_over = overSel?.points ?? null;
+        total_under = underSel?.points ?? null;
       }
     }
 
