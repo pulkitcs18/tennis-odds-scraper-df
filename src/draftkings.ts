@@ -290,6 +290,49 @@ export async function fetchAllTournamentOdds(
     }
   }
 
+  // ── Phase 2: Visit each event's detail page for spread/total markets ──
+  // Tournament listing pages only return Moneyline. The full market set
+  // (spread, total games) is on /event/{slug}/{id}?category=all-odds&subcategory=match-lines
+
+  // Deduplicate events captured so far to build the visit list
+  const capturedEvents = new Map<string, DKContentEvent>();
+  for (const e of allEvents) capturedEvents.set(e.id, e);
+
+  const upcomingEvents = [...capturedEvents.values()].filter((e) => {
+    if (e.status !== "NOT_STARTED") return false;
+    return new Date(e.startEventDate) > new Date();
+  });
+
+  if (upcomingEvents.length > 0) {
+    console.log(
+      `\n[DK] Phase 2: Fetching spread/total for ${upcomingEvents.length} events...`
+    );
+
+    for (const event of upcomingEvents) {
+      // Build event page slug: "Patrick Kypson vs Terence Atmane" → "patrick-kypson-vs-terence-atmane"
+      const nameSlug = event.name
+        .toLowerCase()
+        .replace(/\s+/g, "-")
+        .replace(/[^a-z0-9-]/g, "")
+        .replace(/-+/g, "-");
+
+      const eventUrl = `https://sportsbook.draftkings.com/event/${nameSlug}/${event.id}?category=all-odds&subcategory=match-lines`;
+      console.log(`[DK]   → ${event.name} (${event.id})`);
+
+      try {
+        await page.goto(eventUrl, {
+          waitUntil: "domcontentloaded",
+          timeout: 60000,
+        });
+        await new Promise((r) => setTimeout(r, 5000));
+      } catch (err) {
+        console.error(`[DK] Event page failed for ${event.name}:`, err);
+      }
+    }
+
+    console.log(`[DK] Phase 2 complete.`);
+  }
+
   page.off("response", handler);
 
   // Deduplicate events by id
