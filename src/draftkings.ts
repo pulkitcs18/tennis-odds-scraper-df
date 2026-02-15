@@ -2,7 +2,7 @@ import puppeteer, { Browser, Page } from "puppeteer-core";
 import {
   DK_NAV_URL,
   TENNIS_DISPLAY_GROUP_ID,
-  shouldSkipTournament,
+  isAllowedTournament,
 } from "./config.js";
 
 // ── Browser management ──
@@ -156,8 +156,8 @@ export async function fetchTennisTournaments(): Promise<DKTournament[]> {
 
     if (!eventGroupId || !name) continue;
 
-    if (shouldSkipTournament(name)) {
-      console.log(`[DK] Skipping "${name}" (covered by Odds API)`);
+    if (!isAllowedTournament(name)) {
+      console.log(`[DK] Skipping "${name}" (not ATP 500 / WTA 500)`);
       continue;
     }
 
@@ -172,6 +172,7 @@ export async function fetchTennisTournaments(): Promise<DKTournament[]> {
       name
         .toLowerCase()
         .replace(/\s*-\s*/g, "-")
+        .replace(/\s+/g, "-")
         .replace(/[^a-z0-9-]/g, "")
         .replace(/-+/g, "-");
 

@@ -16,43 +16,47 @@ export const CRON_SCHEDULE = process.env.CRON_SCHEDULE || "0 */2 * * *";
 export const RUN_ON_START = process.env.RUN_ON_START !== "false";
 
 /**
- * Tournaments already covered by The Odds API — skip to avoid duplicates.
+ * Only scrape ATP 500 and WTA 500 tournaments.
+ * DK names look like "ATP - Rotterdam" or "WTA - Adelaide".
+ * We match against these keywords (case-insensitive).
  */
-const SKIP_TOURNAMENT_KEYWORDS = [
-  // Grand Slams
-  "australian open",
-  "french open",
-  "roland garros",
-  "wimbledon",
-  "us open",
-  // Masters 1000
-  "indian wells",
-  "bnp paribas",
-  "miami",
-  "monte carlo",
-  "monte-carlo",
-  "madrid",
-  "italian open",
-  "rome",
-  "internazionali",
-  "canadian open",
-  "rogers cup",
-  "national bank open",
-  "cincinnati",
-  "western & southern",
-  "shanghai",
-  "paris masters",
-  "rolex paris",
-  // Other tournaments covered by Odds API
-  "dubai",
-  "qatar",
-  "doha",
+const ALLOWED_TOURNAMENT_KEYWORDS = [
+  // ATP 500 (13)
+  "rotterdam",
+  "rio",
+  "acapulco",
+  "mexican open",
+  "barcelona",
+  "hamburg",
+  "queen's",
+  "queens",
+  "halle",
+  "washington",
   "china open",
   "beijing",
-  "wuhan",
+  "tokyo",
+  "vienna",
+  "basel",
+  "dubai",
+  // WTA 500 (13)
+  "adelaide",
+  "brisbane",
+  "st. petersburg",
+  "st petersburg",
+  "petersburg",
+  "charleston",
+  "stuttgart",
+  // "washington" already listed above (shared keyword)
+  "san diego",
+  // "tokyo" already listed above (shared keyword)
+  "zhengzhou",
+  "linz",
+  "moscow",
+  "abu dhabi",
+  "eastbourne",
 ];
 
-export function shouldSkipTournament(name: string): boolean {
+export function isAllowedTournament(name: string): boolean {
   const lower = name.toLowerCase();
-  return SKIP_TOURNAMENT_KEYWORDS.some((kw) => lower.includes(kw));
+  return ALLOWED_TOURNAMENT_KEYWORDS.some((kw) => lower.includes(kw));
 }
