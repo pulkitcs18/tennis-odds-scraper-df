@@ -285,13 +285,17 @@ export async function fetchAllTournamentOdds(
 
   page.on("response", handler);
 
-  // Navigate to each tournament page
+  // ── Phase 1: Navigate to tournament pages for events + moneyline ──
+  // Also extract actual event page URLs from the DOM for Phase 2.
+  const eventUrlMap = new Map<string, string>(); // eventId → href
+
   for (const tournament of tournaments) {
     const slug =
       tournament.seoIdentifier ||
       tournament.name
         .toLowerCase()
         .replace(/\s*-\s*/g, "-")
+        .replace(/\s+/g, "-")
         .replace(/[^a-z0-9-]/g, "")
         .replace(/-+/g, "-");
 
@@ -303,9 +307,31 @@ export async function fetchAllTournamentOdds(
         waitUntil: "domcontentloaded",
         timeout: 60000,
       });
-      // Wait for DK's JS to fire API calls
+      // Wait for DK's JS to fire API calls and render DOM
       await new Promise((r) => setTimeout(r, 8000));
       console.log(`[DK] Landed on: ${page.url()}`);
+
+      // Extract event page URLs from the tournament page DOM
+      const links = await page.evaluate(() => {
+        const result: { eventId: string; href: string }[] = [];
+        document.querySelectorAll('a[href*="/event/"]').forEach((a) => {
+          const href = (a as HTMLAnchorElement).href;
+          const match = href.match(/\/event\/[^/]+\/(\d+)/);
+          if (match) {
+            result.push({ eventId: match[1], href });
+          }
+        });
+        return result;
+      });
+
+      for (const link of links) {
+        if (!eventUrlMap.has(link.eventId)) {
+          eventUrlMap.set(link.eventId, link.href);
+        }
+      }
+      console.log(
+        `[DK] Extracted ${links.length} event URLs from DOM`
+      );
     } catch (err) {
       console.error(`[DK] Navigation failed for ${tournament.name}:`, err);
     }
@@ -313,7 +339,7 @@ export async function fetchAllTournamentOdds(
 
   // ── Phase 2: Visit each event's detail page for spread/total markets ──
   // Tournament listing pages only return Moneyline. The full market set
-  // (spread, total games) is on /event/{slug}/{id}?category=all-odds&subcategory=match-lines
+  // (spread, total games) loads on individual event pages.
 
   // Deduplicate events captured so far to build the visit list
   const capturedEvents = new Map<string, DKContentEvent>();
@@ -324,20 +350,23 @@ export async function fetchAllTournamentOdds(
     return new Date(e.startEventDate) > new Date();
   });
 
-  if (upcomingEvents.length > 0) {
+  // Only visit events we have real DOM URLs for
+  const eventsWithUrls = upcomingEvents.filter((e) =>
+    eventUrlMap.has(e.id)
+  );
+
+  if (eventsWithUrls.length > 0) {
     console.log(
-      `\n[DK] Phase 2: Fetching spread/total for ${upcomingEvents.length} events...`
+      `\n[DK] Phase 2: Fetching spread/total for ${eventsWithUrls.length}/${upcomingEvents.length} events (${upcomingEvents.length - eventsWithUrls.length} without DOM links)...`
     );
 
-    for (const event of upcomingEvents) {
-      // Build event page slug: "Patrick Kypson vs Terence Atmane" → "patrick-kypson-vs-terence-atmane"
-      const nameSlug = event.name
-        .toLowerCase()
-        .replace(/\s+/g, "-")
-        .replace(/[^a-z0-9-]/g, "")
-        .replace(/-+/g, "-");
+    for (const event of eventsWithUrls) {
+      const baseUrl = eventUrlMap.get(event.id)!;
+      // Append subcategory params to get all market types
+      const eventUrl = baseUrl.includes("?")
+        ? `${baseUrl}&category=all-odds&subcategory=match-lines`
+        : `${baseUrl}?category=all-odds&subcategory=match-lines`;
 
-      const eventUrl = `https://sportsbook.draftkings.com/event/${nameSlug}/${event.id}?category=all-odds&subcategory=match-lines`;
       console.log(`[DK]   → ${event.name} (${event.id})`);
 
       try {
@@ -346,12 +375,17 @@ export async function fetchAllTournamentOdds(
           timeout: 60000,
         });
         await new Promise((r) => setTimeout(r, 5000));
+        console.log(`[DK]     Landed: ${page.url()}`);
       } catch (err) {
         console.error(`[DK] Event page failed for ${event.name}:`, err);
       }
     }
 
     console.log(`[DK] Phase 2 complete.`);
+  } else if (upcomingEvents.length > 0) {
+    console.log(
+      `\n[DK] Phase 2: No event URLs found in DOM, skipping spread/total fetch`
+    );
   }
 
   page.off("response", handler);
