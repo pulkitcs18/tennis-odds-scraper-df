@@ -192,13 +192,15 @@ export async function fetchTennisTournaments(): Promise<DKTournament[]> {
 }
 
 /**
- * Navigate to the DraftKings tennis page and intercept ALL network
- * responses to capture eventGroup data. DK's own JavaScript makes
- * API calls with proper auth headers that pass the WAF — we just
- * listen for the responses.
+ * Navigate to the DraftKings tennis section and intercept ALL network
+ * responses to capture event/odds data. DK's own JavaScript makes
+ * API calls with proper auth headers that pass the WAF.
  *
- * Also logs every non-static network response for debugging, so
- * we can see exactly what API endpoints DK's frontend uses.
+ * Strategy:
+ * 1. From the homepage, find the Tennis navigation link in the DOM
+ * 2. Click it (SPA routing) to navigate to the tennis section
+ * 3. Intercept all API responses and capture event/odds data
+ * 4. Log all responses for debugging
  */
 export async function fetchAllTournamentOdds(
   page: Page,
@@ -228,45 +230,58 @@ export async function fetchAllTournamentOdds(
 
     if (status !== 200) return;
 
-    // Only try to parse JSON responses
     const ct = resp.headers()["content-type"] || "";
-    if (!ct.includes("json") && !ct.includes("javascript")) return;
+    if (!ct.includes("json")) return;
 
     try {
       const json = await resp.json();
 
-      // Single eventGroup response (v5 API format)
+      // v5 eventGroup format
       if (json?.eventGroup?.eventGroupId) {
         const egId = json.eventGroup.eventGroupId;
         if (targetIds.has(egId)) {
           results.set(egId, json as DKEventGroupResponse);
           console.log(
-            `[DK] Captured eventGroup ${egId} (${json.eventGroup.name}) from: ${shortUrl}`
+            `[DK] Captured eventGroup ${egId} (${json.eventGroup.name})`
           );
         }
       }
 
-      // Array of eventGroups
-      if (Array.isArray(json)) {
-        for (const item of json) {
-          if (item?.eventGroup?.eventGroupId) {
-            const egId = item.eventGroup.eventGroupId;
-            if (targetIds.has(egId)) {
-              results.set(egId, item as DKEventGroupResponse);
-              console.log(
-                `[DK] Captured eventGroup ${egId} from array response`
-              );
-            }
+      // Log structure of DK API responses for discovery
+      if (
+        url.includes("sportscontent") ||
+        url.includes("sportslayout") ||
+        url.includes("sportsstructure") ||
+        url.includes("eventgroup") ||
+        url.includes("events") ||
+        url.includes("markets")
+      ) {
+        const keys = Object.keys(json).slice(0, 15).join(", ");
+        apiLog.push(`  ^ keys: ${keys}`);
+
+        // Deep-log interesting nested data
+        if (json.navigation) {
+          const navStr = JSON.stringify(json.navigation).substring(0, 300);
+          apiLog.push(`  ^ navigation: ${navStr}`);
+        }
+        if (json.events) {
+          const count = Array.isArray(json.events)
+            ? json.events.length
+            : "obj";
+          apiLog.push(`  ^ events: ${count}`);
+          if (Array.isArray(json.events) && json.events[0]) {
+            apiLog.push(
+              `  ^ first event keys: ${Object.keys(json.events[0]).slice(0, 10).join(", ")}`
+            );
           }
         }
-      }
-
-      // Nested structure — some DK endpoints wrap data differently
-      if (json?.events || json?.offers || json?.eventGroup === undefined) {
-        // Log structure for discovery
-        const keys = Object.keys(json).slice(0, 10).join(", ");
-        if (keys && !keys.includes("html")) {
-          apiLog.push(`  ^ JSON keys: ${keys}`);
+        if (json.data) {
+          const dataStr = JSON.stringify(json.data).substring(0, 300);
+          apiLog.push(`  ^ data: ${dataStr}`);
+        }
+        if (json.layout) {
+          const layoutStr = JSON.stringify(json.layout).substring(0, 300);
+          apiLog.push(`  ^ layout: ${layoutStr}`);
         }
       }
     } catch {
@@ -276,41 +291,161 @@ export async function fetchAllTournamentOdds(
 
   page.on("response", handler);
 
-  // Try navigating to the DK tennis page
-  const tennisUrls = [
-    "https://sportsbook.draftkings.com/leagues/tennis",
-    "https://sportsbook.draftkings.com/sport/tennis",
+  // ── Step 1: Find and log ALL navigation links on the DK homepage ──
+  console.log("[DK] Scanning homepage for navigation links...");
+  const allLinks = await page.evaluate(() => {
+    const result: Array<{ href: string; text: string }> = [];
+    document.querySelectorAll("a[href]").forEach((a) => {
+      const href = a.getAttribute("href") || "";
+      const text = (a.textContent || "").trim().substring(0, 60);
+      if (href && text && text.length > 1 && text.length < 40) {
+        result.push({ href, text });
+      }
+    });
+    return result;
+  });
+
+  // Find sport-related links
+  const sportKeywords = [
+    "tennis",
+    "football",
+    "basketball",
+    "baseball",
+    "hockey",
+    "soccer",
+    "golf",
+    "mma",
+    "boxing",
+    "nfl",
+    "nba",
+    "mlb",
+    "nhl",
   ];
+  const sportLinks = allLinks.filter((l) =>
+    sportKeywords.some((kw) => l.text.toLowerCase().includes(kw))
+  );
 
-  for (const url of tennisUrls) {
-    if (results.size === targetIds.size) break;
+  console.log(`[DK] Found ${allLinks.length} links, ${sportLinks.length} sport-related:`);
+  for (const link of sportLinks) {
+    console.log(`  ${link.text}: ${link.href}`);
+  }
 
-    console.log(`[DK] Navigating to ${url}...`);
-    try {
-      await page.goto(url, {
-        waitUntil: "domcontentloaded",
-        timeout: 60000,
+  // ── Step 2: Find tennis link and navigate ──
+  const tennisLink = allLinks.find(
+    (l) => l.text.toLowerCase().trim() === "tennis"
+  ) || allLinks.find((l) => l.text.toLowerCase().includes("tennis"));
+
+  if (tennisLink) {
+    const tennisUrl = tennisLink.href.startsWith("http")
+      ? tennisLink.href
+      : `https://sportsbook.draftkings.com${tennisLink.href}`;
+
+    console.log(`[DK] Found tennis link: "${tennisLink.text}" → ${tennisUrl}`);
+    await page.goto(tennisUrl, {
+      waitUntil: "domcontentloaded",
+      timeout: 60000,
+    });
+    await new Promise((r) => setTimeout(r, 10000));
+    console.log(`[DK] Landed on: ${page.url()}`);
+  } else {
+    // Fallback: click on "Tennis" text in the DOM (SPA routing)
+    console.log("[DK] No tennis <a> link found. Trying to click Tennis element...");
+    const clicked = await page.evaluate(() => {
+      // Try clicking elements that just say "Tennis"
+      const allElements = document.querySelectorAll(
+        'a, button, [role="link"], [role="button"], [role="tab"], li, span, div'
+      );
+      for (const el of allElements) {
+        const text = el.textContent?.trim();
+        if (
+          text?.toLowerCase() === "tennis" &&
+          el.children.length <= 2
+        ) {
+          (el as HTMLElement).click();
+          return `Clicked ${el.tagName}.${el.className}: "${text}"`;
+        }
+      }
+      return null;
+    });
+
+    if (clicked) {
+      console.log(`[DK] ${clicked}`);
+      await new Promise((r) => setTimeout(r, 10000));
+      console.log(`[DK] After click, URL: ${page.url()}`);
+    } else {
+      console.log("[DK] Could not find any Tennis element to click");
+    }
+  }
+
+  // ── Step 3: On the tennis page, look for tournament links ──
+  console.log(
+    `[DK] After tennis navigation: captured ${results.size}/${targetIds.size} tournaments`
+  );
+
+  if (results.size < targetIds.size) {
+    // Log what links are available on this page now
+    const pageLinks = await page.evaluate(() => {
+      const result: Array<{ href: string; text: string }> = [];
+      document.querySelectorAll("a[href]").forEach((a) => {
+        const href = a.getAttribute("href") || "";
+        const text = (a.textContent || "").trim().substring(0, 80);
+        if (href && text) result.push({ href, text });
       });
+      return result;
+    });
 
-      const landedUrl = page.url();
-      console.log(`[DK] Landed on: ${landedUrl}`);
+    const tennisPageLinks = pageLinks.filter(
+      (l) =>
+        l.text.toLowerCase().includes("atp") ||
+        l.text.toLowerCase().includes("wta") ||
+        l.text.toLowerCase().includes("delray") ||
+        l.text.toLowerCase().includes("rio") ||
+        l.text.toLowerCase().includes("midland") ||
+        l.text.toLowerCase().includes("open") ||
+        l.href.includes("tennis")
+    );
 
-      // Wait for DK's JS to make API calls
-      await new Promise((r) => setTimeout(r, 15000));
+    console.log(
+      `[DK] Tennis-related links on current page (${tennisPageLinks.length}):`
+    );
+    for (const link of tennisPageLinks.slice(0, 30)) {
+      console.log(`  ${link.text}: ${link.href}`);
+    }
 
-      console.log(
-        `[DK] After ${url}: captured ${results.size}/${targetIds.size} tournaments`
+    // Try clicking on each tournament
+    for (const tournament of tournaments) {
+      if (results.has(tournament.eventGroupId)) continue;
+
+      const tournamentName = tournament.name
+        .replace(/^(ATP|WTA)\s*-\s*/, "")
+        .toLowerCase();
+
+      const matchingLink = tennisPageLinks.find(
+        (l) =>
+          l.text.toLowerCase().includes(tournamentName) ||
+          l.href.includes(String(tournament.eventGroupId))
       );
 
-      if (results.size > 0) break;
-    } catch (err) {
-      console.log(`[DK] Navigation to ${url} failed: ${err}`);
+      if (matchingLink) {
+        console.log(
+          `[DK] Clicking tournament: ${matchingLink.text} (${matchingLink.href})`
+        );
+        const url = matchingLink.href.startsWith("http")
+          ? matchingLink.href
+          : `https://sportsbook.draftkings.com${matchingLink.href}`;
+        await page.goto(url, {
+          waitUntil: "domcontentloaded",
+          timeout: 60000,
+        });
+        await new Promise((r) => setTimeout(r, 10000));
+        console.log(`[DK] Landed on: ${page.url()}`);
+      }
     }
   }
 
   page.off("response", handler);
 
-  // Debug: log all non-static responses
+  // ── Debug output ──
   console.log(`\n[DK Debug] ${apiLog.length} API/network responses:`);
   for (const line of apiLog) {
     console.log(`  ${line}`);
