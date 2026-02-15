@@ -3,9 +3,6 @@ import "dotenv/config";
 // DraftKings API endpoints
 export const DK_NAV_URL =
   "https://sportsbook-nash.draftkings.com/api/sportscontent/dkusnj/v1/nav/sports";
-export const DK_ODDS_BASE_URL =
-  "https://sportsbook-nash.draftkings.com/sites/US-SB/api/v5/eventgroups";
-
 // Tennis is displayGroupId "6" in DraftKings (API returns string)
 export const TENNIS_DISPLAY_GROUP_ID = "6";
 

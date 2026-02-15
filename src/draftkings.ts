@@ -1,7 +1,6 @@
 import puppeteer, { Browser, Page } from "puppeteer-core";
 import {
   DK_NAV_URL,
-  DK_ODDS_BASE_URL,
   TENNIS_DISPLAY_GROUP_ID,
   shouldSkipTournament,
 } from "./config.js";
@@ -42,9 +41,7 @@ export async function closeBrowser(): Promise<void> {
 
 /**
  * Create a browser page, apply stealth settings, and navigate to
- * sportsbook.draftkings.com to establish session cookies on
- * .draftkings.com — these carry over when we navigate to the
- * sportsbook-nash.draftkings.com API URLs.
+ * sportsbook.draftkings.com to establish session cookies.
  */
 export async function createDKPage(): Promise<Page> {
   if (!browser) throw new Error("Browser not launched");
@@ -55,12 +52,10 @@ export async function createDKPage(): Promise<Page> {
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36"
   );
 
-  // Stealth: hide webdriver flag
   await page.evaluateOnNewDocument(() => {
     Object.defineProperty(navigator, "webdriver", { get: () => false });
   });
 
-  // Visit DK sportsbook to establish session cookies on .draftkings.com
   console.log("[Browser] Navigating to DraftKings to establish session...");
   await page.goto("https://sportsbook.draftkings.com", {
     waitUntil: "domcontentloaded",
@@ -70,66 +65,64 @@ export async function createDKPage(): Promise<Page> {
 
   const cookies = await page.cookies();
   console.log(
-    `[Browser] Session established. ${cookies.length} cookies set. Landed on: ${page.url()}`
+    `[Browser] Session established. ${cookies.length} cookies set.`
   );
 
   return page;
 }
 
-// ── Types for DraftKings API responses ──
+// ── Types for DraftKings Content API ──
 
 export interface DKTournament {
   eventGroupId: number;
   name: string;
+  seoIdentifier?: string;
 }
 
-export interface DKEvent {
-  eventId: number;
+export interface DKContentEvent {
+  id: string;
   name: string;
-  startDate: string;
-  teamName1: string;
-  teamName2: string;
-  eventStatus?: { state: string };
-}
-
-export interface DKOutcome {
-  label: string;
-  oddsDecimal: number;
-  oddsAmerican: string;
-  line?: number;
-  participant?: string;
-}
-
-export interface DKOffer {
-  providerEventId?: string;
-  eventId?: number;
-  label: string;
-  outcomes: DKOutcome[];
-  isSuspended?: boolean;
-}
-
-export interface DKEventGroupResponse {
-  eventGroup: {
-    eventGroupId: number;
+  startEventDate: string;
+  leagueId: string;
+  status: string;
+  participants: Array<{
     name: string;
-    events?: DKEvent[];
-    offerCategories?: Array<{
-      offerCategoryId: number;
-      name: string;
-      offerSubcategoryDescriptors?: Array<{
-        subcategoryId: number;
-        name: string;
-        offerSubcategory?: {
-          offers?: DKOffer[][];
-        };
-      }>;
-    }>;
+    venueRole: string;
+  }>;
+}
+
+export interface DKContentMarket {
+  id: string;
+  eventId: string;
+  name: string;
+  marketType: { name: string };
+}
+
+export interface DKContentSelection {
+  marketId: string;
+  label: string;
+  displayOdds: {
+    american: string;
+    decimal: string;
   };
+  trueOdds: number;
+  outcomeType: string;
+  participants?: Array<{
+    name: string;
+    venueRole: string;
+  }>;
+}
+
+export interface DKContentResponse {
+  leagues: Array<{ id: string; name: string }>;
+  events: DKContentEvent[];
+  markets: DKContentMarket[];
+  selections: DKContentSelection[];
 }
 
 /**
  * Fetch all active tennis tournaments from DraftKings nav API.
- * This endpoint is NOT geo-blocked — uses plain fetch (no browser needed).
+ * Also extracts seoIdentifier for building tournament page URLs.
  */
 export async function fetchTennisTournaments(): Promise<DKTournament[]> {
   console.log("[DK] Fetching tennis tournaments from nav API...");
@@ -150,12 +143,6 @@ export async function fetchTennisTournaments(): Promise<DKTournament[]> {
 
   if (!tennisSport) {
     console.log("[DK] Tennis sport not found in nav response");
-    console.log(
-      "[DK] Available sports:",
-      groups
-        .map((g: any) => `${g.displayName} (${g.displayGroupId})`)
-        .join(", ")
-    );
     return [];
   }
 
@@ -163,7 +150,8 @@ export async function fetchTennisTournaments(): Promise<DKTournament[]> {
   const tournaments: DKTournament[] = [];
 
   for (const eg of eventGroups) {
-    const name: string = eg.eventGroupName || eg.displayName || eg.name || "";
+    const name: string =
+      eg.eventGroupName || eg.displayName || eg.name || "";
     const eventGroupId: number | undefined = eg.eventGroupId;
 
     if (!eventGroupId || !name) continue;
@@ -178,37 +166,49 @@ export async function fetchTennisTournaments(): Promise<DKTournament[]> {
       continue;
     }
 
-    tournaments.push({ eventGroupId, name });
+    // Build seoIdentifier from name: "ATP - Delray Beach" → "atp-delray-beach"
+    const seoIdentifier =
+      eg.seoIdentifier ||
+      name
+        .toLowerCase()
+        .replace(/\s*-\s*/g, "-")
+        .replace(/[^a-z0-9-]/g, "")
+        .replace(/-+/g, "-");
+
+    tournaments.push({ eventGroupId, name, seoIdentifier });
   }
 
   console.log(
     `[DK] Found ${tournaments.length} uncovered tournaments to scrape`
   );
   for (const t of tournaments) {
-    console.log(`  - ${t.name} (eventGroupId: ${t.eventGroupId})`);
+    console.log(`  - ${t.name} (${t.eventGroupId}) → /leagues/tennis/${t.seoIdentifier}`);
   }
 
   return tournaments;
 }
 
 /**
- * Navigate to the DraftKings tennis section and intercept ALL network
- * responses to capture event/odds data. DK's own JavaScript makes
- * API calls with proper auth headers that pass the WAF.
+ * Navigate to each tournament page on DraftKings and intercept the
+ * sportscontent API responses that DK's own JS makes. These responses
+ * contain events, markets, and selections (odds).
  *
- * Strategy:
- * 1. From the homepage, find the Tennis navigation link in the DOM
- * 2. Click it (SPA routing) to navigate to the tennis section
- * 3. Intercept all API responses and capture event/odds data
- * 4. Log all responses for debugging
+ * DK tournament pages: /leagues/tennis/{seoIdentifier}
+ * API responses have shape: { events[], markets[], selections[] }
  */
 export async function fetchAllTournamentOdds(
   page: Page,
   tournaments: DKTournament[]
-): Promise<Map<number, DKEventGroupResponse>> {
-  const targetIds = new Set(tournaments.map((t) => t.eventGroupId));
-  const results = new Map<number, DKEventGroupResponse>();
-  const apiLog: string[] = [];
+): Promise<Map<number, DKContentResponse>> {
+  const targetLeagueIds = new Set(
+    tournaments.map((t) => String(t.eventGroupId))
+  );
+  const results = new Map<number, DKContentResponse>();
+
+  // Accumulate all captured data across page loads
+  const allEvents: DKContentEvent[] = [];
+  const allMarkets: DKContentMarket[] = [];
+  const allSelections: DKContentSelection[] = [];
 
   const handler = async (
     resp: import("puppeteer-core").HTTPResponse
@@ -216,19 +216,13 @@ export async function fetchAllTournamentOdds(
     const url = resp.url();
     const status = resp.status();
 
-    // Skip static assets
+    if (status !== 200) return;
     if (
       /\.(js|css|png|svg|jpg|jpeg|gif|webp|woff2?|ttf|eot|ico)(\?|$)/i.test(
         url
       )
     )
       return;
-    if (url.startsWith("data:")) return;
-
-    const shortUrl = url.length > 200 ? url.substring(0, 200) + "..." : url;
-    apiLog.push(`[${status}] ${shortUrl}`);
-
-    if (status !== 200) return;
 
     const ct = resp.headers()["content-type"] || "";
     if (!ct.includes("json")) return;
@@ -236,219 +230,101 @@ export async function fetchAllTournamentOdds(
     try {
       const json = await resp.json();
 
-      // v5 eventGroup format
-      if (json?.eventGroup?.eventGroupId) {
-        const egId = json.eventGroup.eventGroupId;
-        if (targetIds.has(egId)) {
-          results.set(egId, json as DKEventGroupResponse);
+      // DK Content API: { events[], markets[], selections[] }
+      if (
+        Array.isArray(json.events) &&
+        json.events.length > 0 &&
+        Array.isArray(json.selections)
+      ) {
+        const newEvents = json.events as DKContentEvent[];
+        const newMarkets = (json.markets || []) as DKContentMarket[];
+        const newSelections = json.selections as DKContentSelection[];
+
+        allEvents.push(...newEvents);
+        allMarkets.push(...newMarkets);
+        allSelections.push(...newSelections);
+
+        // Log which leagues we captured
+        const leagueIds = [
+          ...new Set(newEvents.map((e: any) => e.leagueId)),
+        ];
+        const matchingLeagues = leagueIds.filter((id) =>
+          targetLeagueIds.has(id as string)
+        );
+        if (matchingLeagues.length > 0) {
           console.log(
-            `[DK] Captured eventGroup ${egId} (${json.eventGroup.name})`
+            `[DK] Captured ${newEvents.length} events, ${newMarkets.length} markets, ${newSelections.length} selections for leagues: ${matchingLeagues.join(", ")}`
           );
         }
       }
-
-      // Log structure of DK API responses for discovery
-      if (
-        url.includes("sportscontent") ||
-        url.includes("sportslayout") ||
-        url.includes("sportsstructure") ||
-        url.includes("eventgroup") ||
-        url.includes("events") ||
-        url.includes("markets")
-      ) {
-        const keys = Object.keys(json).slice(0, 15).join(", ");
-        apiLog.push(`  ^ keys: ${keys}`);
-
-        // Deep-log interesting nested data
-        if (json.navigation) {
-          const navStr = JSON.stringify(json.navigation).substring(0, 300);
-          apiLog.push(`  ^ navigation: ${navStr}`);
-        }
-        if (json.events) {
-          const count = Array.isArray(json.events)
-            ? json.events.length
-            : "obj";
-          apiLog.push(`  ^ events: ${count}`);
-          if (Array.isArray(json.events) && json.events[0]) {
-            apiLog.push(
-              `  ^ first event keys: ${Object.keys(json.events[0]).slice(0, 10).join(", ")}`
-            );
-          }
-        }
-        if (json.data) {
-          const dataStr = JSON.stringify(json.data).substring(0, 300);
-          apiLog.push(`  ^ data: ${dataStr}`);
-        }
-        if (json.layout) {
-          const layoutStr = JSON.stringify(json.layout).substring(0, 300);
-          apiLog.push(`  ^ layout: ${layoutStr}`);
-        }
-      }
     } catch {
-      // Not valid JSON — skip
+      // Not valid JSON
     }
   };
 
   page.on("response", handler);
 
-  // ── Step 1: Find and log ALL navigation links on the DK homepage ──
-  console.log("[DK] Scanning homepage for navigation links...");
-  const allLinks = await page.evaluate(() => {
-    const result: Array<{ href: string; text: string }> = [];
-    document.querySelectorAll("a[href]").forEach((a) => {
-      const href = a.getAttribute("href") || "";
-      const text = (a.textContent || "").trim().substring(0, 60);
-      if (href && text && text.length > 1 && text.length < 40) {
-        result.push({ href, text });
-      }
-    });
-    return result;
-  });
+  // Navigate to each tournament page
+  for (const tournament of tournaments) {
+    const slug =
+      tournament.seoIdentifier ||
+      tournament.name
+        .toLowerCase()
+        .replace(/\s*-\s*/g, "-")
+        .replace(/[^a-z0-9-]/g, "")
+        .replace(/-+/g, "-");
 
-  // Find sport-related links
-  const sportKeywords = [
-    "tennis",
-    "football",
-    "basketball",
-    "baseball",
-    "hockey",
-    "soccer",
-    "golf",
-    "mma",
-    "boxing",
-    "nfl",
-    "nba",
-    "mlb",
-    "nhl",
-  ];
-  const sportLinks = allLinks.filter((l) =>
-    sportKeywords.some((kw) => l.text.toLowerCase().includes(kw))
-  );
+    const tournamentUrl = `https://sportsbook.draftkings.com/leagues/tennis/${slug}`;
+    console.log(`[DK] Navigating to ${tournamentUrl}...`);
 
-  console.log(`[DK] Found ${allLinks.length} links, ${sportLinks.length} sport-related:`);
-  for (const link of sportLinks) {
-    console.log(`  ${link.text}: ${link.href}`);
-  }
-
-  // ── Step 2: Find tennis link and navigate ──
-  const tennisLink = allLinks.find(
-    (l) => l.text.toLowerCase().trim() === "tennis"
-  ) || allLinks.find((l) => l.text.toLowerCase().includes("tennis"));
-
-  if (tennisLink) {
-    const tennisUrl = tennisLink.href.startsWith("http")
-      ? tennisLink.href
-      : `https://sportsbook.draftkings.com${tennisLink.href}`;
-
-    console.log(`[DK] Found tennis link: "${tennisLink.text}" → ${tennisUrl}`);
-    await page.goto(tennisUrl, {
-      waitUntil: "domcontentloaded",
-      timeout: 60000,
-    });
-    await new Promise((r) => setTimeout(r, 10000));
-    console.log(`[DK] Landed on: ${page.url()}`);
-  } else {
-    // Fallback: click on "Tennis" text in the DOM (SPA routing)
-    console.log("[DK] No tennis <a> link found. Trying to click Tennis element...");
-    const clicked = await page.evaluate(() => {
-      // Try clicking elements that just say "Tennis"
-      const allElements = document.querySelectorAll(
-        'a, button, [role="link"], [role="button"], [role="tab"], li, span, div'
-      );
-      for (const el of allElements) {
-        const text = el.textContent?.trim();
-        if (
-          text?.toLowerCase() === "tennis" &&
-          el.children.length <= 2
-        ) {
-          (el as HTMLElement).click();
-          return `Clicked ${el.tagName}.${el.className}: "${text}"`;
-        }
-      }
-      return null;
-    });
-
-    if (clicked) {
-      console.log(`[DK] ${clicked}`);
-      await new Promise((r) => setTimeout(r, 10000));
-      console.log(`[DK] After click, URL: ${page.url()}`);
-    } else {
-      console.log("[DK] Could not find any Tennis element to click");
-    }
-  }
-
-  // ── Step 3: On the tennis page, look for tournament links ──
-  console.log(
-    `[DK] After tennis navigation: captured ${results.size}/${targetIds.size} tournaments`
-  );
-
-  if (results.size < targetIds.size) {
-    // Log what links are available on this page now
-    const pageLinks = await page.evaluate(() => {
-      const result: Array<{ href: string; text: string }> = [];
-      document.querySelectorAll("a[href]").forEach((a) => {
-        const href = a.getAttribute("href") || "";
-        const text = (a.textContent || "").trim().substring(0, 80);
-        if (href && text) result.push({ href, text });
+    try {
+      await page.goto(tournamentUrl, {
+        waitUntil: "domcontentloaded",
+        timeout: 60000,
       });
-      return result;
-    });
-
-    const tennisPageLinks = pageLinks.filter(
-      (l) =>
-        l.text.toLowerCase().includes("atp") ||
-        l.text.toLowerCase().includes("wta") ||
-        l.text.toLowerCase().includes("delray") ||
-        l.text.toLowerCase().includes("rio") ||
-        l.text.toLowerCase().includes("midland") ||
-        l.text.toLowerCase().includes("open") ||
-        l.href.includes("tennis")
-    );
-
-    console.log(
-      `[DK] Tennis-related links on current page (${tennisPageLinks.length}):`
-    );
-    for (const link of tennisPageLinks.slice(0, 30)) {
-      console.log(`  ${link.text}: ${link.href}`);
-    }
-
-    // Try clicking on each tournament
-    for (const tournament of tournaments) {
-      if (results.has(tournament.eventGroupId)) continue;
-
-      const tournamentName = tournament.name
-        .replace(/^(ATP|WTA)\s*-\s*/, "")
-        .toLowerCase();
-
-      const matchingLink = tennisPageLinks.find(
-        (l) =>
-          l.text.toLowerCase().includes(tournamentName) ||
-          l.href.includes(String(tournament.eventGroupId))
-      );
-
-      if (matchingLink) {
-        console.log(
-          `[DK] Clicking tournament: ${matchingLink.text} (${matchingLink.href})`
-        );
-        const url = matchingLink.href.startsWith("http")
-          ? matchingLink.href
-          : `https://sportsbook.draftkings.com${matchingLink.href}`;
-        await page.goto(url, {
-          waitUntil: "domcontentloaded",
-          timeout: 60000,
-        });
-        await new Promise((r) => setTimeout(r, 10000));
-        console.log(`[DK] Landed on: ${page.url()}`);
-      }
+      // Wait for DK's JS to fire API calls
+      await new Promise((r) => setTimeout(r, 8000));
+      console.log(`[DK] Landed on: ${page.url()}`);
+    } catch (err) {
+      console.error(`[DK] Navigation failed for ${tournament.name}:`, err);
     }
   }
 
   page.off("response", handler);
 
-  // ── Debug output ──
-  console.log(`\n[DK Debug] ${apiLog.length} API/network responses:`);
-  for (const line of apiLog) {
-    console.log(`  ${line}`);
+  // Deduplicate events by id
+  const eventMap = new Map<string, DKContentEvent>();
+  for (const e of allEvents) eventMap.set(e.id, e);
+  const uniqueEvents = [...eventMap.values()];
+
+  const marketMap = new Map<string, DKContentMarket>();
+  for (const m of allMarkets) marketMap.set(m.id, m);
+
+  const selectionMap = new Map<string, DKContentSelection>();
+  for (const s of allSelections)
+    selectionMap.set(`${s.marketId}_${s.outcomeType}`, s);
+
+  // Split by tournament (leagueId = eventGroupId)
+  for (const tournament of tournaments) {
+    const leagueId = String(tournament.eventGroupId);
+    const events = uniqueEvents.filter((e) => e.leagueId === leagueId);
+    if (events.length === 0) continue;
+
+    const eventIds = new Set(events.map((e) => e.id));
+    const markets = [...marketMap.values()].filter((m) =>
+      eventIds.has(m.eventId)
+    );
+    const marketIds = new Set(markets.map((m) => m.id));
+    const selections = [...selectionMap.values()].filter((s) =>
+      marketIds.has(s.marketId)
+    );
+
+    results.set(tournament.eventGroupId, {
+      leagues: [{ id: leagueId, name: tournament.name }],
+      events,
+      markets,
+      selections,
+    });
   }
 
   // Summary
@@ -456,12 +332,14 @@ export async function fetchAllTournamentOdds(
     `\n[DK] Captured data for ${results.size}/${tournaments.length} tournaments:`
   );
   for (const t of tournaments) {
-    const found = results.has(t.eventGroupId);
     const r = results.get(t.eventGroupId);
-    const eventCount = r?.eventGroup?.events?.length ?? 0;
-    console.log(
-      `  ${found ? "OK" : "MISSING"} ${t.name} (${t.eventGroupId})${found ? ` — ${eventCount} events` : ""}`
-    );
+    if (r) {
+      console.log(
+        `  OK ${t.name} — ${r.events.length} events, ${r.markets.length} markets, ${r.selections.length} selections`
+      );
+    } else {
+      console.log(`  MISSING ${t.name} (${t.eventGroupId})`);
+    }
   }
 
   return results;
