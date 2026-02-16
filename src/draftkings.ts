@@ -276,7 +276,24 @@ export async function fetchAllTournamentOdds(
           }
         }
 
-        allSelections.push(...(json.selections as DKContentSelection[]));
+        // Filter: for spread/total markets, only keep MainPointLine (fair odds)
+        const rawSelections = json.selections as DKContentSelection[];
+        const hasMainLine = rawSelections.some((s) =>
+          s.tags?.includes("MainPointLine")
+        );
+        if (hasMainLine) {
+          const mainOnly = rawSelections.filter((s) =>
+            s.tags?.includes("MainPointLine")
+          );
+          allSelections.push(...mainOnly);
+          if (!hasEvents) {
+            console.log(
+              `[DK]   → Filtered to ${mainOnly.length} MainPointLine selections`
+            );
+          }
+        } else {
+          allSelections.push(...rawSelections);
+        }
       }
     } catch {
       // Not valid JSON

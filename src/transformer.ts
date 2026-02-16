@@ -20,8 +20,12 @@ export interface SportEventInsert {
   moneyline_away: number | null;
   spread_home: number | null;
   spread_away: number | null;
+  spread_home_odds: number | null;
+  spread_away_odds: number | null;
   total_over: number | null;
   total_under: number | null;
+  total_over_odds: number | null;
+  total_under_odds: number | null;
 }
 
 /**
@@ -112,8 +116,12 @@ export function transformDKResponse(
     let moneyline_away: number | null = null;
     let spread_home: number | null = null;
     let spread_away: number | null = null;
+    let spread_home_odds: number | null = null;
+    let spread_away_odds: number | null = null;
     let total_over: number | null = null;
     let total_under: number | null = null;
+    let total_over_odds: number | null = null;
+    let total_under_odds: number | null = null;
 
     const eventMarkets = marketsByEvent.get(event.id) || [];
 
@@ -168,6 +176,8 @@ export function transformDKResponse(
 
         spread_home = homeSel?.points ?? null;
         spread_away = awaySel?.points ?? null;
+        spread_home_odds = parseAmericanOdds(homeSel?.displayOdds?.american) ?? null;
+        spread_away_odds = parseAmericanOdds(awaySel?.displayOdds?.american) ?? null;
       }
 
       // ── Total Games ──
@@ -199,6 +209,8 @@ export function transformDKResponse(
 
         total_over = overSel?.points ?? null;
         total_under = underSel?.points ?? null;
+        total_over_odds = parseAmericanOdds(overSel?.displayOdds?.american) ?? null;
+        total_under_odds = parseAmericanOdds(underSel?.displayOdds?.american) ?? null;
       }
     }
 
@@ -217,8 +229,12 @@ export function transformDKResponse(
       moneyline_away,
       spread_home,
       spread_away,
+      spread_home_odds,
+      spread_away_odds,
       total_over,
       total_under,
+      total_over_odds,
+      total_under_odds,
     });
   }
 
