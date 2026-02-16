@@ -376,6 +376,51 @@ export async function fetchAllTournamentOdds(
         });
         await new Promise((r) => setTimeout(r, 5000));
         console.log(`[DK]     Landed: ${page.url()}`);
+
+        // "Total Games" and "Games Spread" are collapsed accordions.
+        // Click them to trigger the API calls for spread/total data.
+        const clicked = await page.evaluate(() => {
+          const opened: string[] = [];
+          // Find collapsed sections by aria-expanded="false"
+          document
+            .querySelectorAll('[aria-expanded="false"]')
+            .forEach((el) => {
+              const text = (el.textContent || "").toLowerCase();
+              if (
+                text.includes("total games") ||
+                text.includes("games spread")
+              ) {
+                (el as HTMLElement).click();
+                opened.push(text.trim().substring(0, 30));
+              }
+            });
+
+          // Fallback: find by heading text if no aria-expanded elements
+          if (opened.length === 0) {
+            const allEls = document.querySelectorAll(
+              "div, span, button, h3, h4"
+            );
+            for (const el of allEls) {
+              const text = (el as HTMLElement).innerText?.trim();
+              if (text === "Total Games" || text === "Games Spread") {
+                (el as HTMLElement).click();
+                opened.push(text);
+              }
+            }
+          }
+
+          return opened;
+        });
+
+        if (clicked.length > 0) {
+          console.log(
+            `[DK]     Expanded: ${clicked.join(", ")}`
+          );
+          // Wait for the API calls triggered by expanding the sections
+          await new Promise((r) => setTimeout(r, 3000));
+        } else {
+          console.log(`[DK]     No collapsed sections found to expand`);
+        }
       } catch (err) {
         console.error(`[DK] Event page failed for ${event.name}:`, err);
       }
