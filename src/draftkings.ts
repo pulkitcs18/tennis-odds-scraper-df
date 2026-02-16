@@ -378,33 +378,45 @@ export async function fetchAllTournamentOdds(
         console.log(`[DK]     Landed: ${page.url()}`);
 
         // "Total Games" and "Games Spread" are collapsed accordions.
-        // Click them to trigger the API calls for spread/total data.
+        // Click each one EXACTLY ONCE to trigger their API calls.
         const clicked = await page.evaluate(() => {
           const opened: string[] = [];
-          // Find collapsed sections by aria-expanded="false"
-          document
-            .querySelectorAll('[aria-expanded="false"]')
-            .forEach((el) => {
-              const text = (el.textContent || "").toLowerCase();
-              if (
-                text.includes("total games") ||
-                text.includes("games spread")
-              ) {
-                (el as HTMLElement).click();
-                opened.push(text.trim().substring(0, 30));
-              }
-            });
+          const targets = ["Total Games", "Games Spread"];
 
-          // Fallback: find by heading text if no aria-expanded elements
-          if (opened.length === 0) {
-            const allEls = document.querySelectorAll(
-              "div, span, button, h3, h4"
+          for (const target of targets) {
+            let found = false;
+
+            // Try aria-expanded="false" first (most reliable)
+            const expandables = document.querySelectorAll(
+              '[aria-expanded="false"]'
             );
-            for (const el of allEls) {
-              const text = (el as HTMLElement).innerText?.trim();
-              if (text === "Total Games" || text === "Games Spread") {
+            for (const el of expandables) {
+              const text = (el.textContent || "").trim();
+              if (text.includes(target)) {
                 (el as HTMLElement).click();
-                opened.push(text);
+                opened.push(target + " (aria)");
+                found = true;
+                break;
+              }
+            }
+
+            // Fallback: find the smallest element with exact text match
+            if (!found) {
+              let bestEl: HTMLElement | null = null;
+              let bestLen = Infinity;
+              const allEls = document.querySelectorAll(
+                "div, span, button, h3, h4, a"
+              );
+              for (const el of allEls) {
+                const text = (el as HTMLElement).innerText?.trim();
+                if (text === target && el.innerHTML.length < bestLen) {
+                  bestEl = el as HTMLElement;
+                  bestLen = el.innerHTML.length;
+                }
+              }
+              if (bestEl) {
+                bestEl.click();
+                opened.push(target + " (text)");
               }
             }
           }
