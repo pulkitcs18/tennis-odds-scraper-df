@@ -456,8 +456,14 @@ export async function fetchAllTournamentOdds(
   for (const m of allMarkets) marketMap.set(m.id, m);
 
   const selectionMap = new Map<string, DKContentSelection>();
-  for (const s of allSelections)
-    selectionMap.set(`${s.marketId}_${s.outcomeType}`, s);
+  for (const s of allSelections) {
+    const key = `${s.marketId}_${s.outcomeType}`;
+    const existing = selectionMap.get(key);
+    // Prefer MainPointLine-tagged selections (the "fair" / main line)
+    if (!existing || s.tags?.includes("MainPointLine")) {
+      selectionMap.set(key, s);
+    }
+  }
 
   // Split by tournament (leagueId = eventGroupId)
   for (const tournament of tournaments) {
